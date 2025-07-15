@@ -1,24 +1,29 @@
-const express = require("express")
-const jwt = require("jsonwebtoken")
-const User = require("../models/User")
-const { auth } = require("../middleware/auth")
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+const { auth } = require("../middleware/auth");
 
-const router = express.Router()
+const router = express.Router();
 
 // Register
 router.post("/register", async (req, res) => {
   try {
-    const { username, password, role } = req.body
+    let { username, password, role } = req.body;
+    username = username.toLowerCase();
 
-    const existingUser = await User.findOne({ username })
+    const existingUser = await User.findOne({ username });
     if (existingUser) {
-      return res.status(400).json({ message: "User already exists" })
+      return res.status(400).json({ message: "User already exists" });
     }
 
-    const user = new User({ username, password, role })
-    await user.save()
+    const user = new User({ username, password, role });
+    await user.save();
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || "your-secret-key", { expiresIn: "7d" })
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET || "your-secret-key",
+      { expiresIn: "7d" }
+    );
 
     res.status(201).json({
       token,
@@ -27,28 +32,33 @@ router.post("/register", async (req, res) => {
         username: user.username,
         role: user.role,
       },
-    })
+    });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
 // Login
 router.post("/login", async (req, res) => {
   try {
-    const { username, password } = req.body
+    let { username, password } = req.body;
+    username = username.toLowerCase();
 
-    const user = await User.findOne({ username })
+    const user = await User.findOne({ username });
     if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" })
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    const isMatch = await user.comparePassword(password)
+    const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" })
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || "your-secret-key", { expiresIn: "7d" })
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET || "your-secret-key",
+      { expiresIn: "7d" }
+    );
 
     res.json({
       token,
@@ -57,11 +67,11 @@ router.post("/login", async (req, res) => {
         username: user.username,
         role: user.role,
       },
-    })
+    });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
 // Get current user
 router.get("/me", auth, async (req, res) => {
@@ -71,7 +81,7 @@ router.get("/me", auth, async (req, res) => {
       username: req.user.username,
       role: req.user.role,
     },
-  })
-})
+  });
+});
 
-module.exports = router
+module.exports = router;
