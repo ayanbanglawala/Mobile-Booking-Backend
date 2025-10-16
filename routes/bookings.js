@@ -1,40 +1,171 @@
-const express = require("express")
-const Booking = require("../models/Booking")
-const Wallet = require("../models/Wallet") // Import Wallet model
-const Dealer = require("../models/Dealer") // Import Dealer model for assignedToDealerId dropdown
-const { auth, adminAuth } = require("../middleware/auth")
+const express = require("express");
+const Booking = require("../models/Booking");
+const Wallet = require("../models/Wallet");
+const Dealer = require("../models/Dealer");
+const { auth, adminAuth } = require("../middleware/auth");
+const { Parser } = require('json2csv');
+const router = express.Router();
 
-const router = express.Router()
-
-// Get all bookings for user OR all bookings for admin
+// Get all bookings with pagination and filtering
 router.get("/", auth, async (req, res) => {
   try {
-    let bookings
-    if (req.user.role === "admin") {
-      // Admin can see all bookings from all users
-      bookings = await Booking.find()
-        .populate("userId", "username")
-        .populate("assignedToDealerId")
-        .populate("dealerBatchId") // Populate dealer batch info
-        .sort({ createdAt: -1 })
-    } else {
-      // Regular users see only their bookings
-      bookings = await Booking.find({ userId: req.user._id })
-        .populate("assignedToDealerId")
-        .populate("dealerBatchId") // Populate dealer batch info
-        .sort({ createdAt: -1 })
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      status = "",
+      platform = "",
+      fromDate = "",
+      toDate = "",
+      userId = ""
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build filter object
+    let filter = {};
+    
+    // Role-based filtering
+    if (req.user.role !== "admin") {
+      filter.userId = req.user._id;
+    } else if (userId) {
+      filter.userId = userId;
     }
-    res.json(bookings)
+
+    // Search filter
+    if (search) {
+      filter.$or = [
+        { mobileModel: { $regex: search, $options: "i" } },
+        { platform: { $regex: search, $options: "i" } },
+        { bookingId: { $regex: search, $options: "i" } },
+        { "userId.username": { $regex: search, $options: "i" } }
+      ];
+    }
+
+    // Status filter
+    if (status) {
+      filter.status = status;
+    }
+
+    // Platform filter
+    if (platform) {
+      filter.platform = { $regex: platform, $options: "i" };
+    }
+
+    // Date range filter
+    if (fromDate || toDate) {
+      filter.bookingDate = {};
+      if (fromDate) {
+        filter.bookingDate.$gte = new Date(fromDate);
+      }
+      if (toDate) {
+        filter.bookingDate.$lte = new Date(toDate);
+      }
+    }
+
+    // Get total count for pagination
+    const total = await Booking.countDocuments(filter);
+
+    // Get bookings with pagination
+    const bookings = await Booking.find(filter)
+      .populate("userId", "username")
+      .populate("assignedToDealerId")
+      .populate("dealerBatchId")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      bookings,
+      pagination: {
+        currentPage: pageNum,
+        totalPages: Math.ceil(total / limitNum),
+        totalItems: total,
+        itemsPerPage: limitNum
+      }
+    });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
+
+// Export bookings to CSV/Excel
+router.get("/export", auth, async (req, res) => {
+  try {
+    const { fromDate, toDate, format = "csv" } = req.query;
+
+    // Build filter object for export
+    let filter = {};
+    
+    // Role-based filtering
+    if (req.user.role !== "admin") {
+      filter.userId = req.user._id;
+    }
+
+    // Date range filter
+    if (fromDate || toDate) {
+      filter.bookingDate = {};
+      if (fromDate) {
+        filter.bookingDate.$gte = new Date(fromDate);
+      }
+      if (toDate) {
+        filter.bookingDate.$lte = new Date(toDate);
+      }
+    }
+
+    // Get bookings for export
+    const bookings = await Booking.find(filter)
+      .populate("userId", "username")
+      .populate("assignedToDealerId", "name")
+      .sort({ bookingDate: 1 });
+
+    // Prepare data for export
+    const exportData = bookings.map(booking => ({
+      "Booking Date": new Date(booking.bookingDate).toLocaleDateString(),
+      "User": booking.userId?.username || "N/A",
+      "Mobile Model": booking.mobileModel,
+      "Booking Price": booking.bookingPrice,
+      "Selling Price": booking.sellingPrice || "N/A",
+      "Profit/Loss": (booking.sellingPrice || 0) - booking.bookingPrice,
+      "Platform": booking.platform,
+      "Card": booking.card,
+      "Status": booking.status,
+      "Booking ID": booking.bookingId || "N/A",
+      "Dealer": booking.assignedToDealerId?.name || booking.dealer || "N/A",
+      "Notes": booking.notes || "N/A",
+      "Created At": new Date(booking.createdAt).toLocaleDateString()
+    }));
+
+    if (format === "csv") {
+      // Export as CSV
+      const json2csvParser = new Parser();
+      const csv = json2csvParser.parse(exportData);
+      
+      res.header('Content-Type', 'text/csv');
+      res.attachment(`bookings-${new Date().toISOString().split('T')[0]}.csv`);
+      res.send(csv);
+    } else {
+      // Export as JSON (for Excel or other formats)
+      res.json({
+        data: exportData,
+        meta: {
+          exportedAt: new Date().toISOString(),
+          totalRecords: exportData.length,
+          dateRange: fromDate && toDate ? `${fromDate} to ${toDate}` : "All dates"
+        }
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ message: "Export failed", error: error.message });
+  }
+});
 
 // Create booking (both user and admin)
 router.post("/", auth, async (req, res) => {
   try {
-    // Destructure only allowed fields for creation
-    const { bookingDate, mobileModel, bookingPrice, sellingPrice, platform, card, notes } = req.body
+    const { bookingDate, mobileModel, bookingPrice, sellingPrice, platform, card, notes } = req.body;
 
     const booking = new Booking({
       userId: req.user._id,
@@ -45,58 +176,53 @@ router.post("/", auth, async (req, res) => {
       platform,
       card,
       notes,
-    })
-    await booking.save()
+    });
+    await booking.save();
 
-    // Populate user info for response
-    await booking.populate("userId", "username")
-    res.status(201).json(booking)
+    await booking.populate("userId", "username");
+    res.status(201).json(booking);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
-// Update booking status (both user and admin, but admin can update any booking)
+// Update booking status
 router.patch("/:id/status", auth, async (req, res) => {
   try {
-    const { status } = req.body
-    let booking
+    const { status } = req.body;
+    let booking;
 
     if (req.user.role === "admin") {
-      // Admin can update any booking
-      booking = await Booking.findById(req.params.id)
+      booking = await Booking.findById(req.params.id);
     } else {
-      // Regular user can only update their own bookings
-      booking = await Booking.findOne({ _id: req.params.id, userId: req.user._id })
+      booking = await Booking.findOne({ _id: req.params.id, userId: req.user._id });
     }
 
     if (!booking) {
-      return res.status(404).json({ message: "Booking not found" })
+      return res.status(404).json({ message: "Booking not found" });
     }
 
-    booking.status = status
+    booking.status = status;
 
     if (status === "given_to_admin") {
-      booking.givenToAdminAt = new Date()
+      booking.givenToAdminAt = new Date();
     }
 
-    await booking.save()
-    await booking.populate("userId", "username")
-    res.json(booking)
+    await booking.save();
+    await booking.populate("userId", "username");
+    res.json(booking);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
-// Update booking (both user and admin, but admin can update any booking)
+// Update booking
 router.put("/:id", auth, async (req, res) => {
   try {
-    let booking
+    let booking;
 
     if (req.user.role === "admin") {
-      // Admin can update any booking and specific fields
-      const { sellingPrice, notes, status, bookingAccount, dealer, bookingId, assignedToDealerId, dealerAmount } =
-        req.body
+      const { sellingPrice, notes, status, bookingAccount, dealer, bookingId, assignedToDealerId, dealerAmount } = req.body;
 
       const updateFields = {
         sellingPrice,
@@ -107,15 +233,13 @@ router.put("/:id", auth, async (req, res) => {
         bookingId,
         assignedToDealerId,
         dealerAmount,
-      }
+      };
 
-      // Remove undefined fields to prevent overwriting with null/undefined
-      Object.keys(updateFields).forEach((key) => updateFields[key] === undefined && delete updateFields[key])
+      Object.keys(updateFields).forEach((key) => updateFields[key] === undefined && delete updateFields[key]);
 
-      booking = await Booking.findByIdAndUpdate(req.params.id, updateFields, { new: true })
+      booking = await Booking.findByIdAndUpdate(req.params.id, updateFields, { new: true });
     } else {
-      // Regular user can only update their own bookings and limited fields
-      const { bookingDate, mobileModel, bookingPrice, sellingPrice, platform, card, notes } = req.body
+      const { bookingDate, mobileModel, bookingPrice, sellingPrice, platform, card, notes } = req.body;
       const updateFields = {
         bookingDate,
         mobileModel,
@@ -124,82 +248,75 @@ router.put("/:id", auth, async (req, res) => {
         platform,
         card,
         notes,
-      }
+      };
       booking = await Booking.findOneAndUpdate({ _id: req.params.id, userId: req.user._id }, updateFields, {
         new: true,
-      })
+      });
     }
 
     if (!booking) {
-      return res.status(404).json({ message: "Booking not found" })
+      return res.status(404).json({ message: "Booking not found" });
     }
 
-    await booking.populate("userId", "username")
-    await booking.populate("assignedToDealerId")
-    await booking.populate("dealerBatchId")
-    res.json(booking)
+    await booking.populate("userId", "username");
+    await booking.populate("assignedToDealerId");
+    await booking.populate("dealerBatchId");
+    res.json(booking);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
-// Delete booking (both user and admin, but admin can delete any booking)
+// Delete booking
 router.delete("/:id", auth, async (req, res) => {
   try {
-    let booking
+    let booking;
 
     if (req.user.role === "admin") {
-      // Admin can delete any booking
-      booking = await Booking.findByIdAndDelete(req.params.id)
+      booking = await Booking.findByIdAndDelete(req.params.id);
     } else {
-      // Regular user can only delete their own bookings
-      booking = await Booking.findOneAndDelete({ _id: req.params.id, userId: req.user._id })
+      booking = await Booking.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
     }
 
     if (!booking) {
-      return res.status(404).json({ message: "Booking not found" })
+      return res.status(404).json({ message: "Booking not found" });
     }
 
-    res.json({ message: "Booking deleted successfully" })
+    res.json({ message: "Booking deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
-// NEW: Admin marks user payment as given and deducts from wallet
+// Mark user payment as given
 router.patch("/:id/mark-user-paid", adminAuth, async (req, res) => {
   try {
-    const { sellingPrice } = req.body // Admin can provide/update sellingPrice here
+    const { sellingPrice } = req.body;
 
-    const booking = await Booking.findById(req.params.id)
+    const booking = await Booking.findById(req.params.id);
 
     if (!booking) {
-      return res.status(404).json({ message: "Booking not found" })
+      return res.status(404).json({ message: "Booking not found" });
     }
 
-    // Update sellingPrice if provided and different
     if (sellingPrice !== undefined && sellingPrice !== null && Number(sellingPrice) >= 0) {
-      booking.sellingPrice = Number(sellingPrice)
+      booking.sellingPrice = Number(sellingPrice);
     } else if (booking.sellingPrice === undefined || booking.sellingPrice === null) {
-      // If sellingPrice is not provided and not set, use bookingPrice as fallback for deduction
-      booking.sellingPrice = booking.bookingPrice
+      booking.sellingPrice = booking.bookingPrice;
     }
 
-    // Ensure sellingPrice is a number for deduction
-    const amountToDeduct = booking.sellingPrice || booking.bookingPrice
+    const amountToDeduct = booking.sellingPrice || booking.bookingPrice;
 
     if (typeof amountToDeduct !== "number" || amountToDeduct <= 0) {
-      return res.status(400).json({ message: "Invalid amount for user payment deduction." })
+      return res.status(400).json({ message: "Invalid amount for user payment deduction." });
     }
 
-    // Update booking status
-    booking.userPaymentGiven = true
-    booking.userPaymentDate = new Date()
-    booking.status = "payment_done"
+    booking.userPaymentGiven = true;
+    booking.userPaymentDate = new Date();
+    booking.status = "payment_done";
 
-    await booking.save()
+    await booking.save();
 
-    // Deduct from Admin Wallet
     const adminWallet = await Wallet.findOneAndUpdate(
       { name: "Admin Wallet" },
       {
@@ -213,16 +330,16 @@ router.patch("/:id/mark-user-paid", adminAuth, async (req, res) => {
           },
         },
       },
-      { upsert: true, new: true }, // Create if not exists, return updated doc
-    )
+      { upsert: true, new: true },
+    );
 
-    await booking.populate("userId", "username")
-    await booking.populate("assignedToDealerId")
-    await booking.populate("dealerBatchId")
-    res.json(booking)
+    await booking.populate("userId", "username");
+    await booking.populate("assignedToDealerId");
+    await booking.populate("dealerBatchId");
+    res.json(booking);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message })
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-})
+});
 
-module.exports = router
+module.exports = router;
