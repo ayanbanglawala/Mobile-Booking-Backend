@@ -279,26 +279,105 @@ router.put("/:id", auth, async (req, res) => {
   }
 });
 
-// Delete booking
-router.delete("/:id", auth, async (req, res) => {
-  try {
-    let booking;
+const mongoose = require("mongoose"); // add at top if not already present
 
+// Delete booking (with transaction reversal)
+router.delete("/:id", auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    // find booking role-aware
+    let booking;
     if (req.user.role === "admin") {
-      booking = await Booking.findByIdAndDelete(req.params.id);
+      booking = await Booking.findById(req.params.id).session(session);
     } else {
-      booking = await Booking.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+      booking = await Booking.findOne({ _id: req.params.id, userId: req.user._id }).session(session);
     }
 
     if (!booking) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(404).json({ message: "Booking not found" });
     }
 
-    res.json({ message: "Booking deleted successfully" });
+    // Amount to reverse from card/wallet:
+    // Use booking.bookingPrice because that's what you deducted on creation.
+    // If your business logic deducts sellingPrice elsewhere, switch accordingly.
+    const amountToReverse = Number(booking.bookingPrice) || 0;
+
+    // 1) Reverse Card availableLimit (if booking was associated with a card)
+    if (booking.card && amountToReverse > 0) {
+      // Try to find card by alias first (your creation used alias lookup)
+      let card = await Card.findOne({ alias: booking.card }).session(session);
+
+      // If not found by alias, try by _id (maybe booking.card saved id)
+      if (!card) {
+        try {
+          card = await Card.findById(booking.card).session(session);
+        } catch (e) {
+          // ignore invalid id parse
+        }
+      }
+
+      if (card) {
+        // increment availableLimit by bookingPrice
+        let updatedCard = await Card.findOneAndUpdate(
+          { _id: card._id },
+          { $inc: { availableLimit: amountToReverse } },
+          { new: true, session }
+        );
+
+        // clamp to card.limit (don't allow availableLimit to exceed limit)
+        if (typeof card.limit === "number" && updatedCard.availableLimit > card.limit) {
+          updatedCard.availableLimit = card.limit;
+          await updatedCard.save({ session });
+        }
+      }
+    }
+
+    // 2) If user payment was already given AND Admin wallet was debited earlier,
+    //     reverse that debit by crediting Admin Wallet back.
+    if (booking.userPaymentGiven) {
+      const amountForWallet = Number(booking.sellingPrice ?? booking.bookingPrice) || 0;
+
+      if (amountForWallet > 0) {
+        const adminWallet = await Wallet.findOneAndUpdate(
+          { name: "Admin Wallet" },
+          {
+            $inc: { balance: amountForWallet }, // credit back
+            $push: {
+              transactions: {
+                type: "credit",
+                amount: amountForWallet,
+                description: `Reversal for deleted booking ${booking.bookingId || booking._id} (mobile: ${booking.mobileModel})`,
+                relatedBookingId: booking._id,
+                createdAt: new Date()
+              }
+            }
+          },
+          { upsert: true, new: true, session }
+        );
+
+        // optional: you might want to record more metadata about the reversal
+      }
+    }
+
+    // 3) Finally, delete the booking
+    await Booking.deleteOne({ _id: booking._id }).session(session);
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.json({ message: "Booking deleted and related transactions reversed" });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    await session.abortTransaction();
+    session.endSession();
+    console.error("Error reversing transaction on delete:", error);
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 });
+
 
 // Mark user payment as given
 router.patch("/:id/mark-user-paid", adminAuth, async (req, res) => {
