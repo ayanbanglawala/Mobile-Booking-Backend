@@ -13,6 +13,8 @@ const userRoutes = require("./routes/users")
 const dealerBatchRoutes = require("./routes/dealerBatches").router
 const walletRoutes = require("./routes/wallet") // Import new wallet routes
 
+const similarityRoutes = require("./routes/similarity") // Import similarity routes
+
 const app = express()
 
 // Middleware
@@ -27,6 +29,7 @@ mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/mobile-bo
 
 // Routes
 app.use("/api/auth", authRoutes)
+app.use("/api/similarity", similarityRoutes) // Use similarity routes
 app.use("/api/bookings", bookingRoutes)
 app.use("/api/cards", cardRoutes)
 app.use("/api/platforms", platformRoutes)

@@ -4,6 +4,28 @@ const { auth } = require("../middleware/auth")
 
 const router = express.Router()
 
+
+router.post("/amountpay", auth, async (req, res) => {
+  try {
+    const { id, amount } = req.body;
+
+    const card = await Card.findOne({ _id: id, userId: req.user._id });
+
+    if (!card) {
+      return res.status(404).json({ message: "Card not found" });
+    }
+
+    const newAvailableLimit = Number(card.availableLimit) + Number(amount);
+    card.availableLimit = newAvailableLimit;
+    console.log(card.availableLimit ,card.availableLimit + amount, card.availableLimit);
+    
+    await card.save();
+
+    res.json({ message: "Available limit updated", availableLimit: card.availableLimit });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
 // Get all cards for user
 router.get("/", auth, async (req, res) => {
   try {

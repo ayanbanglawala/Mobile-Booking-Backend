@@ -4,6 +4,7 @@ const Wallet = require("../models/Wallet");
 const Dealer = require("../models/Dealer");
 const { auth, adminAuth } = require("../middleware/auth");
 const { Parser } = require('json2csv');
+const Card = require("../models/Card");
 const router = express.Router();
 
 // Get all bookings with pagination and filtering
@@ -167,6 +168,16 @@ router.post("/", auth, async (req, res) => {
   try {
     const { bookingDate, mobileModel, bookingPrice, sellingPrice, platform, card, notes } = req.body;
 
+    const limit = await Card.findOne({ alias: card });
+    console.log("CARD : ", limit);
+
+    const updateLimit = await Card.findOneAndUpdate(
+      { _id: limit._id },
+      { availableLimit: limit.limit - bookingPrice },
+      { new: true }
+    );
+    await updateLimit.save();
+    
     const booking = new Booking({
       userId: req.user._id,
       bookingDate,
@@ -183,6 +194,7 @@ router.post("/", auth, async (req, res) => {
     res.status(201).json(booking);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
+    console.log("ERROR : ", error);
   }
 });
 

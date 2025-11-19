@@ -29,6 +29,14 @@ const cardSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    limit:{
+      type: Number,
+      default: 0,
+    },
+    availableLimit:{
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
